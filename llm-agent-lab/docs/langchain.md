@@ -145,7 +145,298 @@ result = config_model2.invoke(
 )
 ```
 
+## 调用工具
 
+在 LangChain 中，聊天模型提供了**工具调用**功能，能使 LLM 与外部服务、API 和数据库进行交互，也可用于从非结构化数据中提取结构化信息。
+
+例如 LLM 无法获取实时天气，此时可以借助工具通过外部搜索服务完成查询；LLM 无法直接获取数据库表数据，也可以借助工具与数据库交互完成查询。
+
+### 创建工具
+
+#### 使用 @tool 装饰器
+
+`@tool` 装饰器是自定义工具的最简单方法，工具通过 `@tool` 加 Python 函数实现：
+
+```python
+from langchain_core.tools import tool
+
+@tool
+def multiply(a: int, b: int) -> int:
+    """Multiply two integers.
+
+    Args:
+        a: First integer
+        b: Second integer
+    """
+    return a * b
+
+print(multiply.invoke({"a": 2, "b": 3}))  # 输出：6
+print(multiply.name)                      # 输出：multiply
+print(multiply.description)               # 输出：Multiply two integers.
+print(multiply.args)                      # 输出：{'a': {'title': 'A', 'type': 'integer'}, ...}
+```
+
+- 装饰器默认使用**函数名称**作为工具名称
+- 装饰器使用**文档字符串**作为工具描述
+- **函数名、类型提示和文档字符串**都是工具 Schema 的一部分，不可缺失
+
+> **什么是 Schema？**
+> Schema 是描述其他数据结构的声明格式，用于自动验证数据。工具 Schema 从函数名、类型提示和文档字符串中获取相关属性，以此声明工具的名称、描述、输入参数、输出类型等。
+>
+> 如果使用简单方式定义工具（如上述示例），工具 Schema 需要解析 **Google 风格的文档字符串**来获取参数描述：
+>
+> ```python
+> def fetch_data(url, retries=3):
+>     """从给定的URL获取数据。
+>
+>     Args:
+>         url (str): 要从中获取数据的URL。
+>         retries (int, optional): 失败时重试的次数。默认为3。
+>
+>     Returns:
+>         dict: 从URL解析的JSON响应。
+>     """
+> ```
+
+**其他定义模式：**
+
+当使用 `@tool` 定义工具时没有提供文档字符串，会报错 `ValueError: Function must have a docstring`。此时有两种解决方式：
+
+**模式一：依赖 Pydantic 类** — 使用 `args_schema` 参数，通过 `Field(description="...")` 添加字段描述：
+
+```python
+from pydantic import BaseModel, Field
+from langchain_core.tools import tool
+
+class AddInput(BaseModel):
+    """Add two integers."""
+    a: int = Field(..., description="First integer")
+    b: int = Field(..., description="Second integer")
+
+@tool(args_schema=AddInput)
+def add(a: int, b: int) -> int:
+    # 未提供文档字符串，依赖 Pydantic 类
+    return a + b
+```
+
+**模式二：依赖 Annotated** — 使用 `Annotated` 和文档字符串传递给工具 Schema：
+
+```python
+from langchain_core.tools import tool
+from typing_extensions import Annotated
+
+@tool
+def add(
+    a: Annotated[int, ..., "First integer"],
+    b: Annotated[int, ..., "Second integer"]
+) -> int:
+    """Add two integers."""
+    return a + b
+```
+
+#### 使用 StructuredTool 类
+
+`StructuredTool.from_function()` 类方法通过给定的函数来创建并返回一个工具：
+
+```python
+from langchain_core.tools import StructuredTool
+
+def multiply(a: int, b: int) -> int:
+    """Multiply two numbers."""
+    return a * b
+
+calculator_tool = StructuredTool.from_function(func=multiply)
+print(calculator_tool.invoke({"a": 2, "b": 3}))  # 输出：6
+```
+
+**关键参数：**
+
+| 参数 | 说明 |
+|------|------|
+| `func` | 工具函数 |
+| `name` | 工具名称，默认为函数名称 |
+| `description` | 工具描述，默认为函数文档字符串 |
+| `args_schema` | 工具输入参数的 Schema |
+| `response_format` | 响应格式，默认 `"content"` |
+
+**response_format 说明：**
+
+- `"content"`（默认）：工具输出仅为 `ToolMessage` 的 `content` 属性（文本），供模型理解和推理
+- `"content_and_artifact"`：输出为 `(content, artifact)` 元组，`artifact` 保存原始结构化数据，供链中后续组件使用
+
+```python
+from langchain_core.tools import StructuredTool
+from pydantic import BaseModel, Field
+from typing import List, Tuple
+
+class CalculatorInput(BaseModel):
+    a: int = Field(description="first number")
+    b: int = Field(description="second number")
+
+def multiply(a: int, b: int) -> Tuple[str, List[int]]:
+    nums = [a, b]
+    content = f"{nums}相乘的结果是{a * b}"
+    return content, nums
+
+calculator_tool = StructuredTool.from_function(
+    func=multiply,
+    name="Calculator",
+    description="两数相乘",
+    args_schema=CalculatorInput,
+    response_format="content_and_artifact"
+)
+
+# 直接调用，只返回 content
+print(calculator_tool.invoke({"a": 2, "b": 3}))  # 输出：[2, 3]相乘的结果是6
+
+# 模拟模型调用，返回 ToolMessage（包含 content 和 artifact）
+print(calculator_tool.invoke({
+    "name": "Calculator",
+    "args": {"a": 2, "b": 3},
+    "id": "123",
+    "type": "tool_call",
+}))
+# 输出：ToolMessage(content='[2, 3]相乘的结果是6', name='Calculator', tool_call_id='123', artifact=[2, 3])
+```
+
+### 绑定工具
+
+使用聊天模型的 `.bind_tools()` 方法将工具绑定到模型，返回一个 `Runnable` 实例：
+
+```python
+from langchain_openai import ChatOpenAI
+
+model = ChatOpenAI(model="gpt-4o-mini")
+tools = [add, multiply]
+model_with_tools = model.bind_tools(tools)
+```
+
+**`bind_tools()` 关键参数：**
+
+| 参数 | 说明 |
+|------|------|
+| `tools` | 工具定义列表，支持字典、Pydantic 类、Python 函数、BaseTool |
+| `tool_choice` | 控制模型调用哪个工具 |
+| `strict` | `True` 保证模型输出与 JSON Schema 完全匹配 |
+| `parallel_tool_calls` | `False` 禁用并行工具调用 |
+
+**`tool_choice` 可选值：**
+- `"auto"` — 自动选择工具（包括无工具）
+- `"none"` — 不调用工具
+- `"any"` / `"required"` / `True` — 强制调用至少一个工具
+- `"<<tool_name>>"` — 调用指定工具
+
+### 工具调用
+
+绑定工具后，使用 `.invoke()` 完成工具调用。模型会根据输入的相关性**自主决定**是否调用工具：
+
+```python
+# 模型判断需要调用工具
+result = model_with_tools.invoke("9乘6等于多少？")
+print(result.tool_calls)
+# [{'name': 'multiply', 'args': {'a': 9, 'b': 6}, 'id': 'call_xxx', 'type': 'tool_call'}]
+
+# 模型判断不需要调用工具
+result = model_with_tools.invoke("hello world!")
+print(result.content)  # 输出：Hello! How can I assist you today?
+```
+
+输出结果是一个 `AIMessage`，其 `tool_calls` 属性包含工具调用所需的一切信息（工具名称、输入参数）。
+
+### 强制模型调用工具
+
+设置 `tool_choice="any"` 可强制模型调用至少一个工具：
+
+```python
+model_with_tools = model.bind_tools(tools, tool_choice="any")
+result = model_with_tools.invoke("hello world!")
+# 即使输入与工具无关，模型仍会调用工具
+```
+
+### 将工具输出传递给聊天模型
+
+仅调用工具后，模型并未返回最终答案。需要将工具输出构建为 `ToolMessage`，连同之前的 `HumanMessage`、`AIMessage` 一起发送给模型，才能获得最终回答。
+
+完整流程：
+
+```python
+from langchain_openai import ChatOpenAI
+from langchain_core.messages import HumanMessage
+from langchain_core.tools import tool
+from typing_extensions import Annotated
+
+model = ChatOpenAI(model="gpt-4o-mini")
+
+@tool
+def add(a: Annotated[int, ..., "First integer"], b: Annotated[int, ..., "Second integer"]) -> int:
+    """Add two integers."""
+    return a + b
+
+@tool
+def multiply(a: Annotated[int, ..., "First integer"], b: Annotated[int, ..., "Second integer"]) -> int:
+    """Multiply two integers."""
+    return a * b
+
+tools = [add, multiply]
+model_with_tools = model.bind_tools(tools)
+
+# 第一次调用：模型返回工具调用请求
+messages = [HumanMessage("9乘6等于多少？5加3等于多少？")]
+ai_msg = model_with_tools.invoke(messages)
+messages.append(ai_msg)
+
+# 执行工具调用，将结果构建为 ToolMessage
+selected_tool = {"add": add, "multiply": multiply}
+for tool_call in ai_msg.tool_calls:
+    tool_msg = selected_tool[tool_call["name"]].invoke(tool_call)
+    messages.append(tool_msg)
+
+# 第二次调用：模型根据工具结果返回最终答案
+result = model.invoke(messages)
+print(result.content)  # 输出：9乘6等于54，5加3等于8。
+```
+
+**流程总结：**
+
+```
+第一次调用：HumanMessage → 模型 → AIMessage（含工具调用请求）
+                                            ↓
+                                    执行工具 → ToolMessage
+                                            ↓
+第二次调用：HumanMessage + AIMessage + ToolMessage → 模型 → AIMessage（最终答案）
+```
+
+### LangChain 提供的工具
+
+LangChain 官方提供了大量现成的工具（Tool）和工具包（Toolkit），继承自 `BaseTool` 和 `BaseToolkit`，涵盖搜索、数据库、网页浏览器等功能，可直接使用。
+
+#### TavilySearch 搜索工具
+
+Tavily 是一个专门为 AI 设计的搜索引擎，能以结构化形式返回搜索结果，便于直接用于后续推理。
+
+```python
+from langchain_openai import ChatOpenAI
+from langchain_core.messages import HumanMessage
+from langchain_tavily import TavilySearch
+
+model = ChatOpenAI(model="gpt-4o-mini")
+
+# 绑定搜索工具，max_results 控制返回结果数量
+tool = TavilySearch(max_results=4)
+model_with_tools = model.bind_tools([tool])
+
+messages = [HumanMessage("中国西安今天的天气怎么样？")]
+ai_msg = model_with_tools.invoke(messages)
+messages.append(ai_msg)
+
+for tool_call in ai_msg.tool_calls:
+    tool_msg = tool.invoke(tool_call)
+    messages.append(tool_msg)
+
+result = model_with_tools.invoke(messages)
+print(result.content)
+# 输出：今天西安的天气情况如下：晴天转多云，最高气温约31℃，最低气温约21℃...
+```
 
 
 

@@ -58,6 +58,92 @@
 
 核心设计：以**链式**的方式，整合多个组件
 
+## 模型创建
+
+LangChain 提供了 **2 种方式** 创建模型：
+
+### 方式一：使用 ChatOpenAI 直接创建
+
+适用于只需要调用 OpenAI 系列模型的场景，直接实例化即可：
+
+```python
+from langchain_openai import ChatOpenAI
+
+model = ChatOpenAI(model="gpt-4o-mini")
+```
+
+**继承关系：**
+
+```
+ChatOpenAI
+  └── BaseChatOpenAI
+        └── Runnable  →  统一 invoke 操作
+```
+
+`ChatOpenAI` 继承自 `Runnable`，因此可以直接使用 `.invoke()` 方法调用模型。
+
+### 方式二：使用 init_chat_model 统一创建
+
+LangChain 提供了 `init_chat_model` 工厂函数，可以用统一的接口创建**不同供应商**的模型，避免记忆各个供应商的类名：
+
+```python
+from langchain.chat_models import init_chat_model
+
+# 创建 DeepSeek 模型
+model = init_chat_model(model="deepseek-v4-flash", model_provider="deepseek")
+
+# 创建 OpenAI 模型
+model = init_chat_model(model="gpt-4o-mini", model_provider="openai")
+```
+
+只需切换 `model` 和 `model_provider` 参数，就能在不同模型之间无缝切换。
+
+### 补充：模型配置器（Configurable Model）
+
+通过 `init_chat_model` 可以创建**可配置模型**，在定义时设置默认参数，在调用时再动态指定模型和参数，适合需要灵活切换模型的场景。
+
+**基本用法：** 创建时设置默认配置，调用时通过 `config` 覆盖：
+
+```python
+from langchain_core.messages import SystemMessage, HumanMessage
+from langchain.chat_models import init_chat_model
+
+# 创建时设置默认参数
+config_model = init_chat_model(temperature=0.2)
+
+message = [
+    SystemMessage("帮我将下面的句子翻译为中文"),
+    HumanMessage("hello")
+]
+
+# 调用时再指定模型
+result = config_model.invoke(input=message, config={
+    "configurable": {
+        "model": "deepseek-v4-flash"
+    }
+})
+```
+
+**进阶用法：** 使用 `configurable_fields` 将指定参数暴露为可配置项，配合 `config_prefix` 避免参数名冲突：
+
+```python
+config_model2 = init_chat_model(
+    temperature=0.2,
+    configurable_fields=("temperature", "model"),  # "any" 表示所有参数都可配置
+    config_prefix="first"  # 配置时需加前缀，避免命名冲突
+)
+
+# 调用时通过 "前缀_参数名" 的方式覆盖
+result = config_model2.invoke(
+    input=message,
+    config={
+        "configurable": {
+            "first_temperature": 2,
+            "first_model": "deepseek-v4-flash"
+        }
+    }
+)
+```
 
 
 

@@ -438,5 +438,286 @@ print(result.content)
 # 输出：今天西安的天气情况如下：晴天转多云，最高气温约31℃，最低气温约21℃...
 ```
 
+## 结构化输出
+
+在 LangChain 中，聊天模型提供了**结构化输出**功能，一种使聊天模型以结构化格式（例如 JSON）进行响应的技术。
+
+### 核心概念
+
+**从"字符串"到"对象"的范式转换：**
+
+传统方式调用聊天模型得到的是一个 `AIMessage`，其内容是一个字符串：
+```python
+model = ChatOpenAI()
+response = model.invoke("告诉我关于苹果公司的最新消息。")
+print(response.content)
+# 输出: "苹果公司于昨日发布了新款iPhone...其股价上涨了2%..."
+```
+
+这个字符串对人类友好，但对程序不友好。如果我们想从这段文本中提取出"公司名"和"股价变化"并用在后续逻辑中，则需要编写复杂且容易出错的解析代码。
+
+聊天模型的 `with_structured_output()` 方法允许我们预先定义一个期望的数据结构，并要求大模型必须按照这个结构返回信息。
+
+### with_structured_output() 方法
+
+这是获得结构化输出的最简单、最可靠的方法。该方法将**输出结构**作为参数输入，返回一个类似 model 的 `Runnable`。不同之处在于执行 Runnable 后的输出结果，输出的不是字符串或消息，而是输出与给定输出结构相对应的对象。
+
+**基本用法：**
+```python
+# 1. 定义输出结构
+schema = {"foo": "bar"}
+# 2. 绑定schema，生成支持结构化返回的 Runnable 实例
+model_with_structure = model.with_structured_output(schema)
+# 3. 执行
+structured_output = model_with_structure.invoke(user_input)
+```
+
+**方法定义：**
+```python
+with_structured_output(
+    schema: dict[str, Any] | type[_BM] | type | None = None,
+    *,
+    method: Literal['function_calling', 'json_mode', 'json_schema'] = 'json_schema',
+    include_raw: bool = False,
+    strict: bool | None = None,
+    **kwargs: Any,
+) → Runnable
+```
+
+**关键参数说明：**
+
+| 参数 | 说明 |
+|------|------|
+| `schema` | 输出结构，可以传入 JSON、TypedDict、Pydantic、OpenAI 函数/工具 |
+| `method` | LLM 的生成方法：`json_schema`（默认）、`function_calling`、`json_mode` |
+| `include_raw` | `True` 返回包含 `raw`、`parsed`、`parsing_error` 的字典 |
+| `strict` | `True` 保证模型输出与 Schema 完全匹配 |
+
+**返回值：**
+- 如果 `schema` 是 Pydantic 类，则 Runnable 输出 Pydantic 对象
+- 否则 Runnable 输出一个字典
+
+### 输出格式示例
+
+#### 返回 Pydantic 对象
+
+```python
+from langchain_openai import ChatOpenAI
+from typing import Optional
+from pydantic import BaseModel, Field
+
+model = ChatOpenAI(model="gpt-4o-mini")
+
+class WeatherInfo(BaseModel):
+    """查询天气信息。"""
+    city: str = Field(description="城市名称")
+    temperature: str = Field(description="当前温度")
+    condition: str = Field(description="天气状况")
+    humidity: Optional[int] = Field(default=None, description="湿度百分比")
+
+structured_model = model.with_structured_output(WeatherInfo)
+result = structured_model.invoke("查询北京今天的天气")
+print(result)
+# 输出：city='北京' temperature='22°C' condition='晴朗' humidity=45
+```
+
+**支持嵌套输出：**
+```python
+class Data(BaseModel):
+    """获取多个城市的天气数据。"""
+    weather_list: List[WeatherInfo]
+
+structured_model = model.with_structured_output(Data)
+result = structured_model.invoke("查询北京和上海今天的天气")
+# 输出：weather_list=[WeatherInfo(city='北京', ...), WeatherInfo(city='上海', ...)]
+```
+
+#### 返回 TypedDict
+
+TypedDict 用于为字典对象提供精确的、结构化的类型提示：
+
+```python
+from typing_extensions import Annotated, TypedDict
+
+class WeatherInfo(TypedDict):
+    """查询天气信息。"""
+    city: Annotated[str, ..., "城市名称"]
+    temperature: Annotated[str, ..., "当前温度"]
+    condition: Annotated[str, ..., "天气状况"]
+    humidity: Annotated[Optional[int], None, "湿度百分比"]
+
+structured_model = model.with_structured_output(WeatherInfo)
+result = structured_model.invoke("查询北京今天的天气")
+# 输出：{'city': '北京', 'temperature': '22°C', 'condition': '晴朗', 'humidity': 45}
+```
+
+#### 返回 JSON
+
+需要定义 JSON Schema：
+
+```python
+json_schema = {
+    "title": "weather_info",
+    "description": "查询天气信息。",
+    "type": "object",
+    "properties": {
+        "city": {"type": "string", "description": "城市名称"},
+        "temperature": {"type": "string", "description": "当前温度"},
+        "condition": {"type": "string", "description": "天气状况"},
+        "humidity": {"type": "integer", "description": "湿度百分比", "default": None},
+    },
+    "required": ["city", "temperature", "condition"],
+}
+
+structured_model = model.with_structured_output(json_schema)
+result = structured_model.invoke("查询北京今天的天气")
+# 输出：{'city': '北京', 'temperature': '22°C', 'condition': '晴朗', 'humidity': 45}
+```
+
+### 选择输出格式
+
+使用 Union 类型创建联合类型属性的父模式，让模型根据输入选择不同的输出格式：
+
+```python
+from pydantic import BaseModel, Field
+from typing import Union
+
+class WeatherInfo(BaseModel):
+    """查询天气信息。"""
+    city: str = Field(description="城市名称")
+    temperature: str = Field(description="当前温度")
+    condition: str = Field(description="天气状况")
+    humidity: Optional[int] = Field(default=None, description="湿度百分比")
+
+class ConversationalResponse(BaseModel):
+    """以对话的方式回应。待人友善，乐于助人。"""
+    response: str = Field(description="对用户查询的会话响应")
+
+class FinalResponse(BaseModel):
+    final_output: Union[WeatherInfo, ConversationalResponse]
+
+structured_model = model.with_structured_output(FinalResponse)
+
+result = structured_model.invoke("查询北京今天的天气")
+# 输出：final_output=WeatherInfo(city='北京', temperature='22°C', condition='晴朗', humidity=45)
+
+result = structured_model.invoke("你好")
+# 输出：final_output=ConversationalResponse(response='你好！有什么我可以帮助你的吗？')
+```
+
+### 实用场景
+
+#### 场景1：作为信息提取器
+
+```python
+from langchain_openai import ChatOpenAI
+from typing import Optional
+from pydantic import BaseModel, Field
+from langchain_core.messages import HumanMessage, SystemMessage
+
+model = ChatOpenAI(model="gpt-4o-mini")
+
+class Person(BaseModel):
+    """一个人的信息。"""
+    # 注意：每个字段都是 Optional —— 允许 LLM 在不知道答案时输出 None
+    # 每个字段都有 description —— LLM 使用这个描述，好的描述可以提高提取结果
+    name: Optional[str] = Field(default=None, description="这个人的名字")
+    hair_color: Optional[str] = Field(default=None, description="如果知道这个人头发的颜色")
+    skin_color: Optional[str] = Field(default=None, description="如果知道这个人的肤色")
+    height_in_meters: Optional[str] = Field(default=None, description="以米为单位的高度")
+
+structured_model = model.with_structured_output(schema=Person)
+messages = [
+    SystemMessage(content="你是一个提取信息的专家，只从文本中提取相关信息。如果您不知道要提取的属性的值，属性值返回null"),
+    HumanMessage(content="史密斯身高6英尺，金发。")
+]
+result = structured_model.invoke(messages)
+print(result)
+# 输出：name='史密斯' hair_color='金发' skin_color=None height_in_meters='1.83'
+```
+
+#### 场景2：与工具结合使用
+
+**注意：** 使用聊天模型原生的工具搭配结构化输出并不好用！更好的用法见 LangGraph Agent 能力。
+
+**方式1：使用 `with_structured_output()` 的 `tools` 参数**
+
+```python
+from langchain_openai import ChatOpenAI
+from pydantic import BaseModel, Field
+from langchain_core.tools import tool
+
+model = ChatOpenAI(model="gpt-4o-mini")
+
+class SearchResult(BaseModel):
+    """结构化搜索结果。"""
+    query: str = Field(description="搜索查询")
+    findings: str = Field(description="调查结果摘要")
+
+@tool
+def web_search(query: str) -> str:
+    """在网上搜索信息。"""
+    return "西安今天多云转小雨，气温18-23度"
+
+structured_search_model = model.with_structured_output(
+    SearchResult,
+    tools=[web_search],
+    strict=True,
+    include_raw=True,
+)
+result = structured_search_model.invoke("搜索当前最新的西安的天气")
+# 注意：这只会返回工具调用请求，不会自动执行工具
+```
+
+**方式2：拆解能力，单独依次执行（推荐）**
+
+当需要同时使用结构化输出和其他工具时，需要注意顺序：
+1. 首先绑定工具
+2. 其次添加结构化输出
+
+```python
+from langchain_openai import ChatOpenAI
+from pydantic import BaseModel, Field
+from langchain_core.tools import tool
+from langchain_core.messages import HumanMessage
+
+model = ChatOpenAI(model="gpt-4o-mini")
+
+class SearchResult(BaseModel):
+    """结构化搜索结果。"""
+    query: str = Field(description="搜索查询")
+    findings: str = Field(description="调查结果摘要")
+
+@tool
+def web_search(query: str) -> str:
+    """在网上搜索信息。"""
+    return "西安今天多云转小雨，气温18-23度，东南风2级，空气质量良好"
+
+# 第一次调用：绑定工具，获取工具调用
+model_with_search = model.bind_tools([web_search])
+messages = [HumanMessage("搜索当前最新的西安的天气")]
+ai_msg = model_with_search.invoke(messages)
+messages.append(ai_msg)
+
+# 执行工具调用，将结果加入消息列表
+for tool_call in ai_msg.tool_calls:
+    tool_msg = web_search.invoke(tool_call)
+    messages.append(tool_msg)
+
+# 第二次调用：使用结构化输出处理包含工具结果的消息
+structured_search_model = model_with_search.with_structured_output(SearchResult)
+result = structured_search_model.invoke(messages)
+print(result)
+# 输出：query='西安天气' findings='西安今天多云转小雨，气温18-23度，东南风2级，空气质量良好。'
+```
+
+**流程总结：**
+```
+第一次调用：HumanMessage → 模型 → AIMessage（含工具调用请求）
+                                            ↓
+                                    执行工具 → ToolMessage
+                                            ↓
+第二次调用：HumanMessage + AIMessage + ToolMessage → 结构化输出模型 → Pydantic对象
+```
 
 
